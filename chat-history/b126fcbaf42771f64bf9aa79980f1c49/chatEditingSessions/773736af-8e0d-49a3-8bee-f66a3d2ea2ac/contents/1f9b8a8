@@ -1,0 +1,138 @@
+<#
+.SYNOPSIS
+    Exports VS Code Copilot chat history for THIS project into the repo so it
+    syncs to GitHub alongside the code.
+
+.DESCRIPTION
+    VS Code stores chat transcripts outside the project, in your user profile:
+        %APPDATA%\Code\User\workspaceStorage\<hash>\
+    The <hash> is derived per-machine/per-path, so this script does NOT hardcode
+    it. Instead it scans every workspaceStorage folder, reads its workspace.json,
+    and matches the one whose "folder" URI points at this repo. It then copies:
+        - chatSessions\*.jsonl        (the full chat transcripts)
+        - chatEditingSessions\*       (edit/checkpoint state)
+        - GitHub.copilot-chat\debug-logs\*  (Chronicle session logs)
+    into chat-history\ under the repo, and writes a manifest.
+
+    Run it whenever you want a snapshot (e.g. before `git push`). Existing files
+    are overwritten with the latest versions; nothing in your profile is changed.
+
+.NOTES
+    Safe & read-only with respect to VS Code's own storage (copy only).
+#>
+
+[CmdletBinding()]
+param(
+    # Set of VS Code variants to search (stable + insiders).
+    [string[]] $CodeVariants = @('Code', 'Code - Insiders')
+)
+
+$ErrorActionPreference = 'Stop'
+
+# --- Resolve paths -----------------------------------------------------------
+# This script lives in <repo>\chat-history\, so the repo root is its parent.
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot  = Split-Path -Parent $ScriptDir
+$DestRoot  = $ScriptDir   # export into chat-history\ itself
+
+Write-Host "Repo root      : $RepoRoot"
+Write-Host "Export target  : $DestRoot"
+
+# Normalize the repo root to a comparable form (lowercased full path).
+$RepoRootNorm = ([System.IO.Path]::GetFullPath($RepoRoot)).TrimEnd('\').ToLowerInvariant()
+
+# --- Helper: decode a file:// URI to a Windows path --------------------------
+function ConvertFrom-FileUri {
+    param([string] $Uri)
+    if ([string]::IsNullOrWhiteSpace($Uri)) { return $null }
+    try {
+        $u = [System.Uri]$Uri
+        if ($u.Scheme -ne 'file') { return $null }
+        # LocalPath handles %20 etc. and gives a Windows path.
+        return ([System.IO.Path]::GetFullPath($u.LocalPath)).TrimEnd('\').ToLowerInvariant()
+    } catch {
+        return $null
+    }
+}
+
+# --- Locate the matching workspaceStorage folder ----------------------------
+$appData = $env:APPDATA
+if (-not $appData) { throw "APPDATA environment variable is not set." }
+
+$matched = @()
+foreach ($variant in $CodeVariants) {
+    $wsStorage = Join-Path $appData "$variant\User\workspaceStorage"
+    if (-not (Test-Path $wsStorage)) { continue }
+
+    Get-ChildItem $wsStorage -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $wsJson = Join-Path $_.FullName 'workspace.json'
+        if (Test-Path $wsJson) {
+            try {
+                $folderUri = (Get-Content $wsJson -Raw | ConvertFrom-Json).folder
+                $folderPath = ConvertFrom-FileUri $folderUri
+                if ($folderPath -and $folderPath -eq $RepoRootNorm) {
+                    $matched += [pscustomobject]@{
+                        Variant = $variant
+                        Hash    = $_.Name
+                        Storage = $_.FullName
+                    }
+                }
+            } catch { }
+        }
+    }
+}
+
+if ($matched.Count -eq 0) {
+    Write-Warning "No VS Code workspaceStorage folder matched this repo path:"
+    Write-Warning "  $RepoRootNorm"
+    Write-Warning "Open this folder in VS Code at least once, then re-run."
+    exit 1
+}
+
+Write-Host "Matched $($matched.Count) workspace storage folder(s)."
+
+# --- Copy the chat data ------------------------------------------------------
+$manifest = [System.Collections.Generic.List[object]]::new()
+
+foreach ($m in $matched) {
+    Write-Host "`n--- $($m.Variant)  [$($m.Hash)] ---"
+    $destBase = Join-Path $DestRoot $m.Hash
+    New-Item -ItemType Directory -Force -Path $destBase | Out-Null
+
+    $sources = @(
+        @{ Name = 'chatSessions';        Path = Join-Path $m.Storage 'chatSessions' },
+        @{ Name = 'chatEditingSessions'; Path = Join-Path $m.Storage 'chatEditingSessions' },
+        @{ Name = 'debug-logs';          Path = Join-Path $m.Storage 'GitHub.copilot-chat\debug-logs' }
+    )
+
+    foreach ($src in $sources) {
+        if (Test-Path $src.Path) {
+            $destSub = Join-Path $destBase $src.Name
+            New-Item -ItemType Directory -Force -Path $destSub | Out-Null
+            Copy-Item -Path (Join-Path $src.Path '*') -Destination $destSub -Recurse -Force -ErrorAction SilentlyContinue
+            $count = (Get-ChildItem $destSub -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+            Write-Host ("  {0,-20} {1,4} file(s)" -f $src.Name, $count)
+            $manifest.Add([pscustomobject]@{
+                variant   = $m.Variant
+                hash      = $m.Hash
+                category  = $src.Name
+                fileCount = $count
+            })
+        } else {
+            Write-Host ("  {0,-20} (none)" -f $src.Name)
+        }
+    }
+}
+
+# --- Write manifest ----------------------------------------------------------
+$manifestPath = Join-Path $DestRoot 'last-export.json'
+[pscustomobject]@{
+    exportedAt = (Get-Date).ToString('o')
+    repoRoot   = $RepoRoot
+    machine    = $env:COMPUTERNAME
+    user       = $env:USERNAME
+    entries    = $manifest
+} | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding UTF8
+
+Write-Host "`nExport complete. Manifest: $manifestPath"
+Write-Host "Now commit & push:  git add chat-history; git commit -m 'Snapshot chat history'; git push"

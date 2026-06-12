@@ -1,0 +1,39 @@
+#!/bin/sh
+# Pre-commit hook: snapshot Copilot chat history into the repo so it is
+# committed alongside the code. Runs the PowerShell export script, then stages
+# the chat-history folder so it is part of THIS commit.
+#
+# Enable on a new machine with:
+#   git config core.hooksPath .githooks
+#
+# To skip a single commit:  git commit --no-verify
+
+repo_root=$(git rev-parse --show-toplevel)
+script="$repo_root/chat-history/export-chat-history.ps1"
+
+if [ ! -f "$script" ]; then
+    echo "pre-commit: chat-history export script not found, skipping."
+    exit 0
+fi
+
+# Find a PowerShell executable (Windows PowerShell or PowerShell Core).
+ps_exe=""
+for c in powershell.exe pwsh.exe pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then
+        ps_exe="$c"
+        break
+    fi
+done
+
+if [ -z "$ps_exe" ]; then
+    echo "pre-commit: PowerShell not found on PATH, skipping chat-history export."
+    exit 0
+fi
+
+echo "pre-commit: exporting Copilot chat history..."
+"$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$script"
+
+# Stage whatever the export produced/updated.
+git add "$repo_root/chat-history"
+
+exit 0
