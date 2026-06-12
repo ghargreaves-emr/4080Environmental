@@ -1,0 +1,12 @@
+# Virtual environment (recreate per-machine via: uv venv .venv ; uv pip install -r requirements.txt)
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated plot output
+gain_error_plot.png

@@ -7,6 +7,3 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
-
-# Generated plot output
-gain_error_plot.png

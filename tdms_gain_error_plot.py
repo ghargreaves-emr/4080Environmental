@@ -76,62 +76,73 @@ def main():
         return
     data = []
 
+    # Collect every .tdms file up front so we can report progress while loading.
+    tdms_files = []
     for subdir in os.listdir(root_path):
         serial_path = os.path.join(root_path, subdir)
         if os.path.isdir(serial_path):
             for file in os.listdir(serial_path):
                 if file.endswith('.tdms'):
-                    filepath = os.path.join(serial_path, file)
-                    try:
-                        parsed_serial, temp_set, rh_set, timestamp = parse_filename(file)
-                        # Load TDMS file
-                        tdms_file = TdmsFile.read(filepath)
-                        # Assume data is in the first group
-                        group = tdms_file.groups()[0]
-                        chamber_temp = get_first_available_channel(
-                            group,
-                            ['Chamber Temperature 300V', 'Chamber Temperature']
-                        )
-                        chamber_rh = get_first_available_channel(
-                            group,
-                            ['Chamber RH% 300V', 'Chamber RH%']
-                        )
-                        avg_temp = np.mean(chamber_temp)
-                        avg_rh = np.mean(chamber_rh)
+                    tdms_files.append((serial_path, file))
 
-                        ranges = [
-                            ('10V', ['Test Points 10V'], ['DUT Measurements 10V']),
-                            ('300V', ['Test Points 300V', 'Test Points'], ['DUT Measurements 300V', 'DUT Measurements'])
-                        ]
+    total_files = len(tdms_files)
+    print(f"Found {total_files} TDMS file(s) to process.")
 
-                        for range_name, test_candidates, dut_candidates in ranges:
-                            test_col = next((col for col in test_candidates if col in group), None)
-                            dut_col = next((col for col in dut_candidates if col in group), None)
-                            if test_col is None or dut_col is None:
-                                continue
+    for idx, (serial_path, file) in enumerate(tdms_files, start=1):
+        print(f"\r[{idx}/{total_files}] Loading {file[:60]}", end='', flush=True)
+        filepath = os.path.join(serial_path, file)
+        try:
+            parsed_serial, temp_set, rh_set, timestamp = parse_filename(file)
+            # Load TDMS file
+            tdms_file = TdmsFile.read(filepath)
+            # Assume data is in the first group
+            group = tdms_file.groups()[0]
+            chamber_temp = get_first_available_channel(
+                group,
+                ['Chamber Temperature 300V', 'Chamber Temperature']
+            )
+            chamber_rh = get_first_available_channel(
+                group,
+                ['Chamber RH% 300V', 'Chamber RH%']
+            )
+            avg_temp = np.mean(chamber_temp)
+            avg_rh = np.mean(chamber_rh)
 
-                            test_points = group[test_col][:]
-                            dut_meas = group[dut_col][:]
-                            gain_error = compute_gain_error_ppm(test_points, dut_meas)
+            ranges = [
+                ('10V', ['Test Points 10V'], ['DUT Measurements 10V']),
+                ('300V', ['Test Points 300V', 'Test Points'], ['DUT Measurements 300V', 'DUT Measurements'])
+            ]
 
-                            # Omit outliers outside the valid gain error window.
-                            if abs(gain_error) > 100:
-                                print(
-                                    f"Omitting {range_name} point from {file}: "
-                                    f"gain error {gain_error:.2f} ppm exceeds +/-100 ppm"
-                                )
-                                continue
+            for range_name, test_candidates, dut_candidates in ranges:
+                test_col = next((col for col in test_candidates if col in group), None)
+                dut_col = next((col for col in dut_candidates if col in group), None)
+                if test_col is None or dut_col is None:
+                    continue
 
-                            data.append({
-                                'timestamp': timestamp,
-                                'serial': parsed_serial,
-                                'range': range_name,
-                                'gain_error': gain_error,
-                                'avg_temp': avg_temp,
-                                'avg_rh': avg_rh
-                            })
-                    except Exception as e:
-                        print(f"Error processing {filepath}: {e}")
+                test_points = group[test_col][:]
+                dut_meas = group[dut_col][:]
+                gain_error = compute_gain_error_ppm(test_points, dut_meas)
+
+                # Omit outliers outside the valid gain error window.
+                if abs(gain_error) > 100:
+                    print(
+                        f"\nOmitting {range_name} point from {file}: "
+                        f"gain error {gain_error:.2f} ppm exceeds +/-100 ppm"
+                    )
+                    continue
+
+                data.append({
+                    'timestamp': timestamp,
+                    'serial': parsed_serial,
+                    'range': range_name,
+                    'gain_error': gain_error,
+                    'avg_temp': avg_temp,
+                    'avg_rh': avg_rh
+                })
+        except Exception as e:
+            print(f"\nError processing {filepath}: {e}")
+
+    print(f"\nDone. Loaded {len(data)} data point(s) from {total_files} file(s).")
 
     # Create DataFrame
     df = pd.DataFrame(data)
