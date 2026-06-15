@@ -11,3 +11,6 @@ __pycache__/
 # Generated plot output
 gain_error_plot.png
 gain_error_plot.html
+gain_error_plot_10V.html
+per_serial_html/
+All_Data_Plot
